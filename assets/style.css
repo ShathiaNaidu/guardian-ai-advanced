@@ -1,0 +1,23 @@
+:root {
+  --guardian-primary: #4f46e5;
+  --guardian-soft: #eef2ff;
+}
+.block-container {padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1250px;}
+.guardian-hero {
+  padding: 1.5rem;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(79,70,229,.15), rgba(14,165,233,.12));
+  border: 1px solid rgba(79,70,229,.20);
+  margin-bottom: 1rem;
+}
+.guardian-card {
+  padding: 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(128,128,128,.22);
+  margin-bottom: .8rem;
+}
+.risk-high {padding: .8rem; border-radius: 12px; background: rgba(220,38,38,.12); border: 1px solid rgba(220,38,38,.3);}
+.risk-medium {padding: .8rem; border-radius: 12px; background: rgba(245,158,11,.13); border: 1px solid rgba(245,158,11,.35);}
+.risk-low {padding: .8rem; border-radius: 12px; background: rgba(16,185,129,.12); border: 1px solid rgba(16,185,129,.3);}
+.small-note {font-size: .86rem; opacity: .78;}
+div[data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.20); padding: .8rem; border-radius: 14px;}
