@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from config import DB_PATH
+from core.time_utils import local_now
 
 
 def _ensure_parent() -> None:
@@ -96,7 +96,7 @@ def init_db() -> None:
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return local_now().isoformat(timespec="seconds")
 
 
 def execute(query: str, params: Iterable[Any] = ()) -> int:
