@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape
 
@@ -30,6 +31,7 @@ VOICE_PROFILES: dict[str, dict[str, str]] = {
     },
     "Tamil": {
         "locale": "ta-MY",
+        "stt_locale": "ta-IN",
         "female": "ta-MY-KaniNeural",
         "male": "ta-MY-SuryaNeural",
     },
@@ -124,6 +126,11 @@ def locale_for_language(language: str) -> str:
     return _profile(language)["locale"]
 
 
+def recognition_locale_for_language(language: str) -> str:
+    profile = _profile(language)
+    return profile.get("stt_locale", profile["locale"])
+
+
 def _base_endpoint() -> str:
     if AZURE_SPEECH_ENDPOINT:
         return AZURE_SPEECH_ENDPOINT.rstrip("/")
@@ -142,6 +149,97 @@ def _synthesis_endpoint() -> str:
 def _voices_endpoint() -> str:
     return f"{_base_endpoint()}/cognitiveservices/voices/list"
 
+
+
+def _recognition_endpoint(language: str) -> str:
+    region = configured_region()
+    if not region:
+        raise RuntimeError(
+            "AZURE_SPEECH_REGION is required for Azure voice-note transcription."
+        )
+
+    query = urlencode(
+        {
+            "language": recognition_locale_for_language(language),
+            "format": "detailed",
+            "profanity": "masked",
+        }
+    )
+    return (
+        f"https://{region}.stt.speech.microsoft.com/"
+        "speech/recognition/conversation/cognitiveservices/v1?"
+        f"{query}"
+    )
+
+
+def transcribe_wav(
+    audio_bytes: bytes,
+    language: str = "English",
+) -> str:
+    """Transcribe one short WAV recording with Azure Speech-to-Text.
+
+    This avoids spending a Gemini request merely to convert a voice note to
+    text. The same Azure Speech resource can provide both STT and neural TTS.
+    """
+    if not is_configured():
+        raise RuntimeError(configuration_error())
+    if not audio_bytes:
+        raise ValueError("The voice recording was empty.")
+
+    request = Request(
+        _recognition_endpoint(language),
+        data=audio_bytes,
+        method="POST",
+        headers={
+            "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+            "Accept": "application/json",
+            "User-Agent": "Guardian-AI-Advanced",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=45) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        raise RuntimeError(_http_error_message(exc)) from exc
+    except URLError as exc:
+        raise RuntimeError(f"Could not reach Azure Speech: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Azure Speech transcription timed out. Record a shorter voice note."
+        ) from exc
+
+    try:
+        result = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Azure returned an invalid transcription response.") from exc
+
+    status = str(result.get("RecognitionStatus", "")).strip()
+    if status.lower() != "success":
+        if status in {"NoMatch", "InitialSilenceTimeout", "BabbleTimeout"}:
+            raise RuntimeError(
+                "Azure could not understand the recording. Speak clearly, keep the "
+                "phone close, and record a shorter question."
+            )
+        raise RuntimeError(
+            f"Azure transcription did not succeed: {status or 'unknown status'}."
+        )
+
+    nbest = result.get("NBest") or []
+    if nbest and isinstance(nbest[0], dict):
+        transcript = str(
+            nbest[0].get("Display")
+            or nbest[0].get("Lexical")
+            or ""
+        ).strip()
+    else:
+        transcript = str(result.get("DisplayText") or "").strip()
+
+    if not transcript:
+        raise RuntimeError("Azure returned no transcript for the recording.")
+
+    return transcript
 
 def _clean_text(text: str, maximum_characters: int = 5000) -> str:
     clean = " ".join((text or "").split())
@@ -373,8 +471,9 @@ def friendly_error(exc: Exception) -> str:
 
     if "http 400" in lower or "bad request" in lower:
         return (
-            "Azure rejected the speech request. Try the connection test and "
-            "confirm that a matching voice is available in the resource region."
+            "Azure rejected the speech request. For voice notes, record again in "
+            "the language selected in Profile. For spoken replies, run the Azure "
+            "connection test and confirm the selected voice is supported."
         )
 
     if "not configured" in lower:
