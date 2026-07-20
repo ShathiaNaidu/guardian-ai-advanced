@@ -30,6 +30,32 @@ def _client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
+def _generate_content(**kwargs: Any) -> Any:
+    """Run one synchronous Gemini request with a safely owned client.
+
+    The google-genai SDK can close the underlying HTTP client too early when
+    ``genai.Client(...)`` is used only as a temporary expression, for example
+    ``_client().models.generate_content(...)``. Keeping the client in a local
+    context manager ensures it stays alive for the complete request and is
+    then closed cleanly.
+    """
+    last_error: Exception | None = None
+
+    # Retry once only for the known premature-client-close condition.
+    for attempt in range(2):
+        try:
+            with _client() as client:
+                return client.models.generate_content(**kwargs)
+        except RuntimeError as exc:
+            last_error = exc
+            if "client has been closed" not in str(exc).lower() or attempt == 1:
+                raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Gemini request failed before it could be sent.")
+
+
 SYSTEM_PROMPT = f"""
 You are Guardian AI, a careful everyday assistant for users in {APP_COUNTRY}.
 The user's timezone is {APP_TIMEZONE}. Give clear, practical answers in simple language.
@@ -83,6 +109,11 @@ def friendly_error(exc: Exception) -> str:
         return (
             "The Gemini request timed out. Try again with a shorter message or "
             "smaller media file."
+        )
+    if "client has been closed" in lower:
+        return (
+            "The Gemini connection closed unexpectedly. The app will create a fresh "
+            "client for the next request; record the voice question again."
         )
     if "blocked" in lower or "safety" in lower:
         return (
@@ -180,7 +211,7 @@ def ask_guardian(
         tools = [types.Tool(google_search=types.GoogleSearch())]
 
     try:
-        response = _client().models.generate_content(
+        response = _generate_content(
             model=model,
             contents=contents,
             config=types.GenerateContentConfig(
@@ -227,7 +258,7 @@ def analyze_image(image_bytes: bytes, prompt: str) -> str:
             data=image_bytes,
             mime_type=_image_mime(image_bytes),
         )
-        response = _client().models.generate_content(
+        response = _generate_content(
             model=GEMINI_VISION_MODEL,
             contents=[prompt, image_part],
             config=types.GenerateContentConfig(
@@ -255,7 +286,7 @@ def analyze_image_json(image_bytes: bytes, prompt: str) -> dict[str, Any]:
             data=image_bytes,
             mime_type=_image_mime(image_bytes),
         )
-        response = _client().models.generate_content(
+        response = _generate_content(
             model=GEMINI_VISION_MODEL,
             contents=[prompt, image_part],
             config=types.GenerateContentConfig(
@@ -306,7 +337,7 @@ def transcribe_audio(audio_bytes: bytes, suffix: str = ".wav") -> str:
             "without a summary, explanation, timestamps, speaker labels, quotation "
             "marks, or Markdown. Preserve the original spoken language."
         )
-        response = _client().models.generate_content(
+        response = _generate_content(
             model=GEMINI_AUDIO_MODEL,
             contents=[prompt, audio_part],
             config=types.GenerateContentConfig(
@@ -324,7 +355,7 @@ def test_connection() -> tuple[bool, str]:
     if not ai_available():
         return False, "GEMINI_API_KEY is not configured."
     try:
-        response = _client().models.generate_content(
+        response = _generate_content(
             model=GEMINI_MODEL,
             contents="Reply with exactly: Guardian Gemini connection successful",
         )
