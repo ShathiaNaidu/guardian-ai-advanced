@@ -34,10 +34,18 @@ DB_PATH = Path(_setting("GUARDIAN_DB_PATH", str(BASE_DIR / "data" / "guardian.db
 # Gemini handles chat, grounded Google Search, image understanding, and
 # voice-note transcription. Use current stable model names in Streamlit Secrets.
 GEMINI_API_KEY = _setting("GEMINI_API_KEY")
-GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = _setting("GEMINI_MODEL", "gemini-3.1-flash-lite")
 GEMINI_SEARCH_MODEL = _setting("GEMINI_SEARCH_MODEL", GEMINI_MODEL)
 GEMINI_VISION_MODEL = _setting("GEMINI_VISION_MODEL", GEMINI_MODEL)
 GEMINI_AUDIO_MODEL = _setting("GEMINI_AUDIO_MODEL", GEMINI_MODEL)
+GEMINI_FALLBACK_MODELS = tuple(
+    model.strip()
+    for model in _setting(
+        "GEMINI_FALLBACK_MODELS",
+        "gemini-3.1-flash-lite,gemini-2.5-flash-lite,gemini-3.5-flash",
+    ).split(",")
+    if model.strip()
+)
 
 # Azure Speech is used only for natural spoken AI replies.
 AZURE_SPEECH_KEY = _setting("AZURE_SPEECH_KEY")
