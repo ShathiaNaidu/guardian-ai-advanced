@@ -50,6 +50,8 @@ def init_state() -> None:
         "last_ai_audio_id": None,
         "last_autoplayed_audio_id": None,
         "voice_error": None,
+        "last_processed_voice_hash": None,
+        "last_voice_transcript": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -147,6 +149,8 @@ def sidebar() -> str:
         st.session_state.last_ai_audio_id = None
         st.session_state.last_autoplayed_audio_id = None
         st.session_state.voice_error = None
+        st.session_state.last_processed_voice_hash = None
+        st.session_state.last_voice_transcript = None
         st.rerun()
     return selected
 
@@ -256,7 +260,7 @@ def ai_page() -> None:
     )
     speak = col2.toggle(
         "Generate natural spoken reply",
-        value=False,
+        value=True,
         help="Uses Azure Neural TTS for natural spoken output.",
     )
     voice_preference = col3.selectbox(
@@ -271,6 +275,8 @@ def ai_page() -> None:
         st.session_state.last_ai_audio_id = None
         st.session_state.last_autoplayed_audio_id = None
         st.session_state.voice_error = None
+        st.session_state.last_processed_voice_hash = None
+        st.session_state.last_voice_transcript = None
         st.rerun()
 
     with st.expander("Gemini API connection test"):
@@ -335,20 +341,50 @@ def ai_page() -> None:
             "press Play once when needed."
         )
 
-    audio = st.audio_input("Optional: record a voice question")
-    if audio and st.button("Transcribe and ask voice question"):
-        with st.spinner("Transcribing..."):
-            transcript = transcribe_audio(audio.getvalue(), suffix=".wav")
-        if transcript.lower().startswith("transcription failed") or "requires gemini" in transcript.lower():
-            st.error(transcript)
-        else:
-            st.info(f"You said: {transcript}")
-            _submit_ai_prompt(
-                transcript,
-                live_search,
-                speak,
-                voice_preference,
+    st.subheader("🎤 Voice question")
+    st.caption(
+        "Record your question and press the recorder's stop button. Guardian AI "
+        "will automatically transcribe it, send it to Gemini, and create the answer."
+    )
+    audio = st.audio_input("Record a voice question")
+
+    if st.session_state.last_voice_transcript:
+        st.info(f"Last voice question: {st.session_state.last_voice_transcript}")
+
+    if audio:
+        audio_bytes = audio.getvalue()
+        audio_hash = hashlib.sha256(audio_bytes).hexdigest() if audio_bytes else None
+
+        # Process each completed recording exactly once. Streamlit reruns after
+        # the answer is added, while the audio widget may still contain the same
+        # recording, so the hash prevents duplicate questions.
+        if (
+            audio_hash
+            and audio_hash != st.session_state.last_processed_voice_hash
+        ):
+            st.session_state.last_processed_voice_hash = audio_hash
+            st.session_state.voice_error = None
+
+            with st.spinner("Listening and preparing your answer..."):
+                transcript = transcribe_audio(audio_bytes, suffix=".wav")
+
+            transcript_lower = transcript.lower()
+            transcription_failed = (
+                transcript_lower.startswith("transcription failed")
+                or "requires gemini" in transcript_lower
             )
+
+            if transcription_failed:
+                st.session_state.voice_error = transcript
+                st.error(transcript)
+            else:
+                st.session_state.last_voice_transcript = transcript
+                _submit_ai_prompt(
+                    transcript,
+                    live_search,
+                    speak,
+                    voice_preference,
+                )
 
     prompt = st.chat_input("Ask Guardian AI...")
     if prompt:
