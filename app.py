@@ -12,7 +12,14 @@ import plotly.express as px
 import streamlit as st
 
 from config import APP_NAME, GEMINI_API_KEY, GEMINI_MODEL, MALAYSIA_EMERGENCY_NUMBER, NPRA_PRODUCT_SEARCH_URL
-from core.ai_assistant import ai_available, analyze_image, ask_guardian, test_connection as test_gemini_connection, transcribe_audio
+from core.ai_assistant import (
+    ai_available,
+    analyze_image,
+    ask_guardian,
+    configured_models,
+    test_connection as test_gemini_connection,
+    transcribe_audio,
+)
 from core.azure_voice import (
     configuration_error as azure_configuration_error,
     configured_region as azure_configured_region,
@@ -20,6 +27,7 @@ from core.azure_voice import (
     is_configured as azure_voice_available,
     synthesize_mp3,
     test_connection as test_azure_connection,
+    transcribe_wav as azure_transcribe_wav,
     voice_for_language,
 )
 from core.auth import authenticate, change_password, register_user, update_profile
@@ -249,14 +257,14 @@ def _submit_ai_prompt(
 def ai_page() -> None:
     hero(
         "🤖 AI Assistant",
-        "Ask Gemini, use grounded Google Search, record a voice question, analyze images, and hear natural Azure Neural replies.",
+        "Ask Gemini with automatic model fallback, record voice questions through Azure Speech, analyze images, and hear natural Azure Neural replies.",
     )
 
     col1, col2, col3, col4 = st.columns([1.1, 1.1, 1.1, 1])
     live_search = col1.toggle(
         "Use Gemini Google Search",
-        value=True,
-        help="Grounds current or changing answers with Google Search and returns source links when available.",
+        value=False,
+        help="Turn this on only for current or changing information. Leaving it off saves Gemini quota.",
     )
     speak = col2.toggle(
         "Generate natural spoken reply",
@@ -281,8 +289,9 @@ def ai_page() -> None:
 
     with st.expander("Gemini API connection test"):
         st.caption(
-            f"Chat, Google Search grounding, image understanding and voice-note "
-            f"transcription use `{GEMINI_MODEL}` unless separate model secrets are set."
+            f"Primary model: `{GEMINI_MODEL}`. Automatic fallback order: "
+            f"`{' → '.join(configured_models(GEMINI_MODEL))}`. Voice-note "
+            "transcription uses Azure Speech first, which saves one Gemini request."
         )
         if st.button("Test Gemini API", disabled=not ai_available()):
             with st.spinner("Testing Gemini..."):
@@ -344,9 +353,9 @@ def ai_page() -> None:
     st.subheader("🎤 Voice question")
     st.caption(
         "Record your question and press the recorder's stop button. Guardian AI "
-        "will automatically transcribe it, send it to Gemini, and create the answer."
+        "will transcribe it with Azure Speech, send only the text question to Gemini, and create the answer."
     )
-    audio = st.audio_input("Record a voice question")
+    audio = st.audio_input("Record a voice question", sample_rate=16000)
 
     if st.session_state.last_voice_transcript:
         st.info(f"Last voice question: {st.session_state.last_voice_transcript}")
@@ -365,18 +374,41 @@ def ai_page() -> None:
             st.session_state.last_processed_voice_hash = audio_hash
             st.session_state.voice_error = None
 
-            with st.spinner("Listening and preparing your answer..."):
-                transcript = transcribe_audio(audio_bytes, suffix=".wav")
+            preferred_language = st.session_state.user.get("language", "English")
+
+            # Azure Speech-to-Text is attempted first so a voice question uses
+            # only one Gemini request: the answer-generation request. Gemini
+            # transcription remains as an emergency fallback.
+            transcript = ""
+            azure_transcription_error = ""
+            if azure_voice_available():
+                try:
+                    with st.spinner("Transcribing your voice with Azure Speech..."):
+                        transcript = azure_transcribe_wav(
+                            audio_bytes,
+                            language=preferred_language,
+                        )
+                except Exception as exc:
+                    azure_transcription_error = azure_friendly_error(exc)
+
+            if not transcript and ai_available():
+                with st.spinner("Azure transcription was unavailable; trying Gemini..."):
+                    transcript = transcribe_audio(audio_bytes, suffix=".wav")
 
             transcript_lower = transcript.lower()
             transcription_failed = (
-                transcript_lower.startswith("transcription failed")
+                not transcript
+                or transcript_lower.startswith("transcription failed")
                 or "requires gemini" in transcript_lower
             )
 
             if transcription_failed:
-                st.session_state.voice_error = transcript
-                st.error(transcript)
+                message = transcript or azure_transcription_error or (
+                    "Voice transcription is unavailable. Check the Azure Speech "
+                    "key and region, then try again."
+                )
+                st.session_state.voice_error = message
+                st.error(message)
             else:
                 st.session_state.last_voice_transcript = transcript
                 _submit_ai_prompt(
