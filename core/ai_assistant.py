@@ -12,6 +12,7 @@ from config import (
     APP_TIMEZONE,
     GEMINI_API_KEY,
     GEMINI_AUDIO_MODEL,
+    GEMINI_FALLBACK_MODELS,
     GEMINI_MODEL,
     GEMINI_SEARCH_MODEL,
     GEMINI_VISION_MODEL,
@@ -30,30 +31,77 @@ def _client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
-def _generate_content(**kwargs: Any) -> Any:
-    """Run one synchronous Gemini request with a safely owned client.
+def _is_fallback_error(exc: Exception) -> bool:
+    lower = str(exc).lower()
+    return any(
+        marker in lower
+        for marker in (
+            "429",
+            "resource_exhausted",
+            "quota",
+            "rate limit",
+            "503",
+            "unavailable",
+            "high demand",
+            "404",
+            "not found",
+            "does not exist",
+        )
+    )
 
-    The google-genai SDK can close the underlying HTTP client too early when
-    ``genai.Client(...)`` is used only as a temporary expression, for example
-    ``_client().models.generate_content(...)``. Keeping the client in a local
-    context manager ensures it stays alive for the complete request and is
-    then closed cleanly.
+
+def configured_models(primary_model: str | None = None) -> tuple[str, ...]:
+    """Return the primary Gemini model followed by unique fallback models."""
+    ordered: list[str] = []
+    for model in (primary_model or GEMINI_MODEL, *GEMINI_FALLBACK_MODELS):
+        clean = str(model or "").strip()
+        if clean and clean not in ordered:
+            ordered.append(clean)
+    return tuple(ordered)
+
+
+def _generate_content(*, model: str, **kwargs: Any) -> tuple[Any, str]:
+    """Run Gemini with automatic model fallback.
+
+    Free-tier rate limits are model-specific. When the selected model is at
+    quota, temporarily unavailable, or removed, Guardian AI automatically
+    tries the configured fallback models before showing an error.
     """
+    models = configured_models(model)
     last_error: Exception | None = None
+    attempted: list[str] = []
 
-    # Retry once only for the known premature-client-close condition.
-    for attempt in range(2):
-        try:
-            with _client() as client:
-                return client.models.generate_content(**kwargs)
-        except RuntimeError as exc:
-            last_error = exc
-            if "client has been closed" not in str(exc).lower() or attempt == 1:
+    for candidate in models:
+        attempted.append(candidate)
+
+        # Retry once only for the known premature-client-close condition.
+        for close_attempt in range(2):
+            try:
+                with _client() as client:
+                    response = client.models.generate_content(
+                        model=candidate,
+                        **kwargs,
+                    )
+                return response, candidate
+            except Exception as exc:
+                last_error = exc
+                lower = str(exc).lower()
+
+                if "client has been closed" in lower and close_attempt == 0:
+                    continue
+
+                # Try the next model only for quota, capacity, or model
+                # availability problems. Invalid credentials and safety errors
+                # should be reported immediately.
+                if _is_fallback_error(exc) and candidate != models[-1]:
+                    break
                 raise
 
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("Gemini request failed before it could be sent.")
+    attempted_text = ", ".join(attempted)
+    raise RuntimeError(
+        "All configured Gemini models were unavailable after automatic "
+        f"fallback. Tried: {attempted_text}. Last error: {last_error}"
+    )
 
 
 SYSTEM_PROMPT = f"""
@@ -85,13 +133,20 @@ def friendly_error(exc: Exception) -> str:
             "Gemini rejected the API key. Create a valid key in Google AI Studio "
             "and update GEMINI_API_KEY in Streamlit Secrets."
         )
+    if "all configured gemini models were unavailable" in lower:
+        return (
+            "Guardian AI tried every configured Gemini fallback model, but all "
+            "were unavailable or at quota. Wait for the limit to reset, or add "
+            "billing to the Google AI project for higher limits."
+        )
     if any(
         marker in lower
         for marker in ("429", "resource_exhausted", "quota", "rate limit")
     ):
         return (
-            "The Gemini project reached a quota or rate limit. Check Google AI "
-            "Studio → Dashboard → Rate limits and try again after the limit resets."
+            "All configured Gemini models are currently at quota or temporarily "
+            "unavailable. Guardian AI already tried its automatic fallback models. "
+            "Wait for the rate limit to reset, or enable billing for higher limits."
         )
     if (
         "404" in lower
@@ -101,7 +156,8 @@ def friendly_error(exc: Exception) -> str:
         return (
             "The configured Gemini model is unavailable. Set GEMINI_MODEL, "
             "GEMINI_SEARCH_MODEL, GEMINI_VISION_MODEL and GEMINI_AUDIO_MODEL "
-            "to a currently available model such as gemini-3.5-flash."
+            "to a current model such as gemini-3.1-flash-lite or "
+            "gemini-2.5-flash-lite."
         )
     if any(marker in lower for marker in ("503", "unavailable", "high demand")):
         return "Gemini is temporarily busy or unavailable. Wait briefly and try again."
@@ -127,10 +183,10 @@ def _history_contents(history: list[dict[str, str]]) -> list[Any]:
     from google.genai import types
 
     contents: list[Any] = []
-    for item in history[-10:]:
+    for item in history[-6:]:
         raw_role = str(item.get("role", "user")).lower()
         role = "model" if raw_role in {"assistant", "model"} else "user"
-        text = str(item.get("content", "")).strip()[:8000]
+        text = str(item.get("content", "")).strip()[:4000]
         if text:
             contents.append(
                 types.Content(
@@ -211,13 +267,13 @@ def ask_guardian(
         tools = [types.Tool(google_search=types.GoogleSearch())]
 
     try:
-        response = _generate_content(
+        response, used_model = _generate_content(
             model=model,
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.25,
-                max_output_tokens=2500,
+                max_output_tokens=1200,
                 tools=tools,
             ),
         )
@@ -258,13 +314,13 @@ def analyze_image(image_bytes: bytes, prompt: str) -> str:
             data=image_bytes,
             mime_type=_image_mime(image_bytes),
         )
-        response = _generate_content(
+        response, used_model = _generate_content(
             model=GEMINI_VISION_MODEL,
             contents=[prompt, image_part],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0.1,
-                max_output_tokens=2200,
+                max_output_tokens=1200,
             ),
         )
         return (response.text or "").strip() or "Gemini returned no image analysis."
@@ -286,13 +342,13 @@ def analyze_image_json(image_bytes: bytes, prompt: str) -> dict[str, Any]:
             data=image_bytes,
             mime_type=_image_mime(image_bytes),
         )
-        response = _generate_content(
+        response, used_model = _generate_content(
             model=GEMINI_VISION_MODEL,
             contents=[prompt, image_part],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_output_tokens=2200,
+                max_output_tokens=1200,
                 response_mime_type="application/json",
             ),
         )
@@ -337,7 +393,7 @@ def transcribe_audio(audio_bytes: bytes, suffix: str = ".wav") -> str:
             "without a summary, explanation, timestamps, speaker labels, quotation "
             "marks, or Markdown. Preserve the original spoken language."
         )
-        response = _generate_content(
+        response, used_model = _generate_content(
             model=GEMINI_AUDIO_MODEL,
             contents=[prompt, audio_part],
             config=types.GenerateContentConfig(
@@ -355,13 +411,16 @@ def test_connection() -> tuple[bool, str]:
     if not ai_available():
         return False, "GEMINI_API_KEY is not configured."
     try:
-        response = _generate_content(
+        response, used_model = _generate_content(
             model=GEMINI_MODEL,
             contents="Reply with exactly: Guardian Gemini connection successful",
         )
         text = (response.text or "").strip()
         if not text:
             return False, "Gemini connected but returned no text."
-        return True, f"Gemini API connected successfully using `{GEMINI_MODEL}`."
+        return True, (
+            f"Gemini API connected successfully using `{used_model}`. "
+            f"Automatic fallback order: {', '.join(configured_models(GEMINI_MODEL))}."
+        )
     except Exception as exc:
         return False, friendly_error(exc)
