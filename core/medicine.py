@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from core.ai_assistant import analyze_image_json
+from core.time_utils import local_today
 
 MAL_PATTERN = re.compile(r"\bMAL\s*\d{8,12}\s*[A-Z]?\b", re.I)
 
@@ -85,7 +86,7 @@ def expiry_status(expiry: str | date | None) -> dict[str, Any]:
     if not expiry:
         return {"status": "Unverified", "days_remaining": None, "message": "No reliable expiry date was found."}
     expiry_date = date.fromisoformat(expiry) if isinstance(expiry, str) else expiry
-    days = (expiry_date - date.today()).days
+    days = (expiry_date - local_today()).days
     if days < 0:
         return {"status": "Expired", "days_remaining": days, "message": "The detected expiry date has passed. Do not use it."}
     if days <= 30:
