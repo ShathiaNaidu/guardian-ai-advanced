@@ -11,12 +11,13 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from config import APP_NAME, GEMINI_API_KEY, GEMINI_MODEL, MALAYSIA_EMERGENCY_NUMBER, NPRA_PRODUCT_SEARCH_URL
+from config import APP_NAME, APP_TIMEZONE, GEMINI_API_KEY, GEMINI_MODEL, MALAYSIA_EMERGENCY_NUMBER, NPRA_PRODUCT_SEARCH_URL
 from core.ai_assistant import (
     ai_available,
     analyze_image,
     ask_guardian,
     configured_models,
+    requires_live_search,
     test_connection as test_gemini_connection,
     transcribe_audio,
 )
@@ -37,6 +38,7 @@ from core.news_service import CATEGORY_QUERIES, get_news
 from core.reminders import add_reminder, delete_reminder, list_reminders, set_completed
 from core.safety import add_phone_report, analyze_scam_text, analyze_url, decode_qr, normalize_phone, phone_reputation
 from core.weather_service import get_weather
+from core.time_utils import local_now, local_today
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -167,7 +169,7 @@ def dashboard_page() -> None:
     user = st.session_state.user
     hero("Good day, " + user["full_name"], "Your safety, information and daily-assistance dashboard.")
     reminders = list_reminders(user["id"], include_completed=False)
-    today = date.today()
+    today = local_today()
     next_week = today + timedelta(days=7)
     due_soon = [item for item in reminders if today.isoformat() <= item["due_date"] <= next_week.isoformat()]
     reports = fetch_one("SELECT COUNT(*) AS count FROM scam_reports") or {"count": 0}
@@ -213,18 +215,32 @@ def _submit_ai_prompt(
     history = st.session_state.chat_history
     history.append({"role": "user", "content": prompt})
 
-    with st.spinner("Guardian AI is checking your request..."):
+    automatic_live_search = requires_live_search(prompt)
+    effective_live_search = bool(live_search or automatic_live_search)
+
+    spinner_text = (
+        "Guardian AI is verifying this with live sources..."
+        if effective_live_search
+        else "Guardian AI is checking your request..."
+    )
+    with st.spinner(spinner_text):
         answer = ask_guardian(
             prompt,
             history=history[:-1],
-            live_search=live_search,
+            live_search=effective_live_search,
             preferred_language=preferred_language,
         )
 
     history.append({"role": "assistant", "content": answer})
     execute(
         "INSERT INTO chat_logs(user_id, prompt, response, used_live_search, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user["id"], prompt[:10000], answer[:20000], 1 if live_search else 0, now_iso()),
+        (
+            user["id"],
+            prompt[:10000],
+            answer[:20000],
+            1 if effective_live_search else 0,
+            now_iso(),
+        ),
     )
 
     st.session_state.voice_error = None
@@ -262,9 +278,13 @@ def ai_page() -> None:
 
     col1, col2, col3, col4 = st.columns([1.1, 1.1, 1.1, 1])
     live_search = col1.toggle(
-        "Use Gemini Google Search",
+        "Use live search for every question",
         value=False,
-        help="Turn this on only for current or changing information. Leaving it off saves Gemini quota.",
+        help=(
+            "Optional. Guardian AI automatically forces live Google Search for "
+            "current events, sports results, office-holders, prices, laws, "
+            "weather, schedules and other changing facts even when this is off."
+        ),
     )
     speak = col2.toggle(
         "Generate natural spoken reply",
@@ -428,8 +448,9 @@ def ai_page() -> None:
         )
 
     st.caption(
-        "For politics, Guardian AI should describe verified events and major "
-        "viewpoints without telling users what political opinion to adopt."
+        "Automatic truth check is active: changing factual questions force live "
+        "Google Search. If no grounding sources are returned, Guardian AI refuses "
+        "to guess. Politics answers should remain neutral and source-based."
     )
 
 
@@ -628,8 +649,8 @@ def reminders_page() -> None:
         with st.form("reminder_form"):
             title = st.text_input("Reminder title")
             category = st.selectbox("Category", ["Medicine", "Appointment", "Bill", "Document expiry", "Safety", "Study/work", "Other"])
-            due_date = st.date_input("Due date", min_value=date.today())
-            due_time = st.time_input("Time", value=datetime.now().replace(second=0, microsecond=0).time())
+            due_date = st.date_input("Due date", min_value=local_today())
+            due_time = st.time_input("Time", value=local_now().replace(second=0, microsecond=0).time())
             notes = st.text_area("Notes")
             submitted = st.form_submit_button("Save reminder")
         if submitted:
